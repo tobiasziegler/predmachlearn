@@ -1,0 +1,168 @@
+---
+title: 'Practical Machine Learning Project: Predicting Manner of Weightlifting Execution
+  from Wearable Sensor Data'
+author: "David Mallard"
+date: "26 September 2015"
+output: html_document
+---
+
+# Introduction
+
+This report presents an analysis of data from the [Weight Lifting Exercises Dataset from Groupware@LES](http://groupware.les.inf.puc-rio.br/har). The young healthy participants who performed biceps curl repetitions. Participants performed the exercises either according to the specifications or by making a number of types of error in execution. My aim was to build a model to predict the manner in which a person carried out the exercise, as indicated by the `classe` variable, using the other available variables for the exercise.
+
+The subsequent analyses make use of the `caret` R package to load other packages as required and carry out most of the preprocessing, model building and prediction tasks.
+
+```{r}
+library(caret)
+```
+
+# Data Preparation and Cleaning
+
+The report made use of a [training dataset](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) for model selection and validation and a [testing dataset](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) to evaluate the model's predictions of 20 cases. These data files were downloaded to a local data folder.
+
+```{r, eval=FALSE}
+# Initialise the data folder and download files if required.
+if(!file.exists("./data")) {
+  dir.create("./data")
+  trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(trainUrl, "./data/pml-training.csv", method = "curl")
+  download.file(testUrl, "./data/pml-testing.csv", method = "curl")
+}
+```
+
+The training dataset was then loaded and initial data processing undertaken.
+
+```{r}
+training_full <- read.csv("./data/pml-training.csv", na.strings = c("NA", "#DIV/0!"))
+```
+
+To address the risk of overfitting and allow an estimate of out-of-sample error, the training set was split into two subsamples, with 60% of cases used for model training and 40% for cross-validation.
+
+```{r}
+set.seed(801) # Set a seed for reproducibility
+inTrain <- createDataPartition(y = training_full$classe, p = 0.6, list = FALSE)
+training <- training_full[inTrain,]
+validation <- training_full[-inTrain,]
+```
+
+Initial inspection of the dataset indicated several issues that required preprocessing before model fitting could begin.
+
+The first seven variables in the dataset were removed as they contained identifying and extraneous information that was not relevant to the sensor records.
+
+```{r}
+training <- training[,-(1:7)]
+```
+
+Next, variables that represented summary statistics of sensor data (e.g., maximum, skewness, amplitude) were all removed, as these variables did not provide information in each of the individual rows in the dataset that would be used for training and prediction.
+
+```{r}
+summary_stats <- grep("^(kurtosis_|skewness_|max_|min_|amplitude_|var_|avg_|stddev_)", names(training))
+training <- training[,-(summary_stats)]
+```
+
+After cleaning away these variables, analysis was carried out to check whether any of the remaining variables had near zero variance.
+
+```{r}
+nzv <- nearZeroVar(training)
+if(length(nzv) > 0) {
+  training <- training[,-(nzv)]
+}
+```
+
+The correlations between the remaining variables were then calculated. Because high correlations between variables can be problematic for some prediction models, any variables that were identified as having absolute correlations greater than .9 were removed.
+
+```{r}
+train_cor <- cor(training[,-length(training)])
+high_cor <- findCorrelation(train_cor, cutoff = .9)
+training <- training[,-high_cor]
+```
+
+
+The same transformations were then applied to the validation dataset.
+
+```{r}
+validation <- validation[,-(1:7)]
+validation <- validation[,-(summary_stats)]
+if(length(nzv) > 0) {
+  validation <- validation[,-(nzv)]
+}
+validation <- validation[,-high_cor]
+```
+
+# Model Building and Validation
+
+## Recursive partitioning tree
+
+To see whether a relatively non-intensive and interpretable approach to model-building might yield adequate results, the first model was built using recursive tree classification. This model was then tested on the validation sample to see how its classification performed.
+
+```{r, cache=TRUE}
+mod_rpart <- train(classe ~ ., method = "rpart", data = training)
+pred_rpart <- predict(mod_rpart, validation)
+confusionMatrix(pred_rpart, validation$classe)
+```
+
+The overall accuracy rate of not much more than 50% leaves a great deal of room for improvement and isn't adequate to feel satisfied that this model would give adequate predictions.
+
+## Random forests
+
+As a method that combines tree classification with boostrapping aggregation (bagging), random forests are regarded as one of the most generally effective methods to build prediction models that maximise accuracy. The next step was to build a random forests model and examine how it performed in cross-validation.
+
+```{r, cache=TRUE}
+mod_rf <- train(classe ~ ., method = "rf", data = training)
+pred_rf <- predict(mod_rf, validation)
+confusionMatrix(pred_rf, validation$classe)
+```
+
+This model yielded a classification accuracy of greater than 99%, meaning that the estimate out-of-sample error rate is 1 - 0.9911 = 0.89%.
+
+## Boosting
+
+Another approach that also yields generally positive results is boosting. A boosted trees model was built to see whether it could provide comparable or greater accuracy than the random forests approach.
+
+```{r, cache=TRUE}
+mod_gbm <- train(classe ~ ., method = "gbm", data = training, verbose = FALSE)
+pred_gbm <- predict(mod_gbm, validation)
+confusionMatrix(pred_gbm, validation$classe)
+```
+
+The classification accuracy of slightly above 95% was quite high but still clearly not able to match the random forests model.
+
+Given that the random forests model alone achieved an out-of-sample error rate below 1%, developing an ensemble model that combines random forests with one or more of the other approaches was not attempted as it would provide fairly minor improvements to accuracy.
+
+## Predictions on Testing Dataset
+
+Finally, the testing dataset was loaded and predictions made for each of the 20 cases. These predictions were written to separate text files for submission as part of this project.
+
+```{r}
+testing <- read.csv("./data/pml-testing.csv", na.strings = c("NA", "#DIV/0!"))
+
+# Clean the data to match the training dataset
+testing <- testing[,-(1:7)]
+testing <- testing[,-(summary_stats)]
+if(length(nzv) > 0) {
+  testing <- testing[,-(nzv)]
+}
+testing <- testing[,-high_cor]
+
+# Generate predictions and write to output files
+predictions <- predict(mod_rf, testing)
+
+pml_write_files = function(x) {
+  n = length(x)
+  for(i in 1:n) {
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(predictions)
+```
+
+# Conclusion
+
+The sensor data was able to make highly reliable predictions about the manner of execution of the associated exercise when used in conjunction with a random forests classification model. The cross-validation results demonstrate that we could expect the model would demonstrate an error rate of around 0.89% when used on data independent of the training dataset. The plot below shows the most important variables in the model.
+
+```{r}
+varImpPlot(mod_rf$finalModel, main = "Variable Importance, Random Forests Model")
+```
